@@ -1,0 +1,83 @@
+name: Publish AgentBox image
+
+# Builds the GMI AgentBox image (deploy/agentbox/Dockerfile.agentbox) and
+# publishes it to this repo's GitHub Container Registry (ghcr.io).
+#
+# After the first successful run, make the package public once in:
+#   GitHub -> your profile -> Packages -> hermes-agent -> Package settings
+#   -> Change visibility -> Public
+# Then point GMI AgentBox at:
+#   ghcr.io/<your-username>/hermes-agent:latest   (Enable Credentials: OFF)
+
+on:
+  # Run it by hand from the Actions tab (best for a demo).
+  workflow_dispatch:
+  # ...and automatically when you push a version tag like v1, v1.2.3
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+  packages: write   # required to push to ghcr.io
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # ghcr image names must be lowercase; usernames can contain uppercase.
+      - name: Compute lowercase image name
+        id: img
+        run: echo "ref=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/hermes-agentbox" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 1/2 — Build the base Hermes image (the slow step) and push it as the
+      # ':base' tag so the AgentBox build below can pull it as its FROM image.
+      - name: Build & push base image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64        # AgentBox compute is x86_64 (IOWA IDC-1)
+          push: true
+          tags: ${{ steps.img.outputs.ref }}:base
+          cache-from: type=gha,scope=agentbox-base
+          cache-to: type=gha,mode=max,scope=agentbox-base
+
+      # 2/2 — Build the thin AgentBox layer on top and push it as ':latest'.
+      # This is the image you register in the AgentBox wizard.
+      - name: Build & push AgentBox image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/agentbox/Dockerfile.agentbox
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            BASE_IMAGE=${{ steps.img.outputs.ref }}:base
+          tags: ${{ steps.img.outputs.ref }}:latest
+
+      - name: Summary
+        run: |
+          {
+            echo "## AgentBox image published "
+            echo ""
+            echo "**Register URL:** \`${{ steps.img.outputs.ref }}:latest\`"
+            echo ""
+            echo "Next: make the package **public** (Packages -> hermes-agent ->"
+            echo "Package settings -> Change visibility), then point GMI AgentBox"
+            echo "at the URL above with Enable Credentials **OFF**."
+          } >> "$GITHUB_STEP_SUMMARY"
